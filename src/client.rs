@@ -1,10 +1,12 @@
 use anyhow::{anyhow, Context, Result};
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 use reqwest::{Client, Method, Response, StatusCode};
 use serde::Serialize;
 use serde_json::Value;
 
 use crate::config::Config;
+
+const UA: &str = concat!("zammad-cli/", env!("CARGO_PKG_VERSION"));
 
 pub struct ZammadClient {
     http: Client,
@@ -20,6 +22,8 @@ impl ZammadClient {
             HeaderValue::from_str(&auth).context("Invalid token characters")?,
         );
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        // Explicit UA — bypasses Cloudflare WAF default-UA blocks (error 1010)
+        headers.insert(USER_AGENT, HeaderValue::from_static(UA));
         let http = Client::builder()
             .default_headers(headers)
             .timeout(std::time::Duration::from_secs(30))
@@ -61,6 +65,15 @@ impl ZammadClient {
     pub async fn put<B: Serialize + ?Sized>(&self, path: &str, body: Option<&B>) -> Result<Value> {
         self.request::<(), B>(Method::PUT, path, None, body).await
     }
+
+    pub async fn delete<B: Serialize + ?Sized>(
+        &self,
+        path: &str,
+        body: Option<&B>,
+    ) -> Result<Value> {
+        self.request::<(), B>(Method::DELETE, path, None, body)
+            .await
+    }
 }
 
 async fn handle_response(resp: Response) -> Result<Value> {
@@ -77,15 +90,17 @@ async fn handle_response(resp: Response) -> Result<Value> {
     }
 
     let body = resp.text().await.unwrap_or_default();
-    let msg = serde_json::from_str::<Value>(&body)
-        .ok()
+    let parsed = serde_json::from_str::<Value>(&body).ok();
+    let msg = parsed
+        .as_ref()
         .and_then(|v| {
-            v.get("error")
+            v.get("error_human")
+                .or_else(|| v.get("error"))
                 .or_else(|| v.get("message"))
                 .and_then(|m| m.as_str())
                 .map(|s| s.to_string())
         })
-        .unwrap_or(body);
+        .unwrap_or_else(|| body.clone());
 
     let prefix = match status {
         StatusCode::NOT_FOUND => "Not found (404)",
@@ -95,5 +110,9 @@ async fn handle_response(resp: Response) -> Result<Value> {
         StatusCode::UNPROCESSABLE_ENTITY => "Unprocessable (422)",
         _ => "Zammad API error",
     };
-    Err(anyhow!("{prefix}: {msg}"))
+    if !body.is_empty() && body.trim() != msg.trim() {
+        Err(anyhow!("{prefix}: {msg}\n--- raw: {body}"))
+    } else {
+        Err(anyhow!("{prefix}: {msg}"))
+    }
 }

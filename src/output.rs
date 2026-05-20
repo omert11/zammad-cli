@@ -136,6 +136,13 @@ pub fn print_articles(articles: &[Article]) {
         for line in a.body.lines() {
             println!("  {line}");
         }
+        if !a.attachments.is_empty() {
+            println!("  {}", "Attachments:".bold());
+            for att in &a.attachments {
+                let size = att.size.as_deref().unwrap_or("?");
+                println!("    - {} ({} bytes)", att.filename, size);
+            }
+        }
         println!("{}", "---".dimmed());
     }
     println!(

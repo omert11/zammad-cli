@@ -4,16 +4,17 @@ use futures::future::try_join_all;
 use serde_json::{Map, Value};
 
 use crate::client::ZammadClient;
+use crate::commands::tags::{tag_op, TICKET_OBJECT};
 use crate::output;
 use crate::types::{Article, Ticket};
-use crate::util::{build_search_query, insert_opt_str};
+use crate::util::{build_attachments_opt, build_search_query, insert_opt_str, split_csv};
 
 #[derive(Subcommand)]
 pub enum TicketCmd {
     /// Search tickets by text query (Zammad search syntax accepted)
     Search {
         query: String,
-        #[arg(long, default_value_t = 20)]
+        #[arg(long, visible_alias = "per-page", default_value_t = 20)]
         limit: u32,
     },
     /// List tickets with filters
@@ -32,7 +33,7 @@ pub enum TicketCmd {
         priority: Option<String>,
         #[arg(long, default_value_t = 1)]
         page: u32,
-        #[arg(long, default_value_t = 20)]
+        #[arg(long, visible_alias = "limit", default_value_t = 20)]
         per_page: u32,
     },
     /// Get ticket details by `#NUMBER` (ticket number) or plain integer (internal ID)
@@ -53,6 +54,18 @@ pub enum TicketCmd {
         priority: String,
         #[arg(long, default_value = "new")]
         state: String,
+        /// Assign owner (email or login)
+        #[arg(long)]
+        owner: Option<String>,
+        /// Attach to organization (by name)
+        #[arg(long)]
+        organization: Option<String>,
+        /// Comma-separated tags to add after creation (e.g. "billing,urgent")
+        #[arg(long)]
+        tags: Option<String>,
+        /// Comma-separated file paths to attach to the initial article
+        #[arg(long)]
+        attachments: Option<String>,
     },
     /// Update ticket (`#NUMBER` or internal ID)
     Update {
@@ -65,6 +78,16 @@ pub enum TicketCmd {
         owner: Option<String>,
         #[arg(long)]
         title: Option<String>,
+        #[arg(long)]
+        customer: Option<String>,
+        #[arg(long)]
+        organization: Option<String>,
+        /// Comma-separated tags to add (e.g. "billing,urgent")
+        #[arg(long = "tags-add")]
+        tags_add: Option<String>,
+        /// Comma-separated tags to remove
+        #[arg(long = "tags-remove")]
+        tags_remove: Option<String>,
     },
     /// Article subcommands
     Article {
@@ -87,6 +110,9 @@ pub enum ArticleCmd {
         /// Mark as public reply (default: internal note)
         #[arg(long)]
         public: bool,
+        /// Comma-separated file paths to attach
+        #[arg(long)]
+        attachments: Option<String>,
     },
 }
 
@@ -126,21 +152,61 @@ pub async fn run(cmd: TicketCmd, client: &ZammadClient, json: bool) -> Result<()
             customer,
             priority,
             state,
-        } => create(client, title, body, group, customer, priority, state, json).await,
+            owner,
+            organization,
+            tags,
+            attachments,
+        } => {
+            create(
+                client,
+                title,
+                body,
+                group,
+                customer,
+                priority,
+                state,
+                owner,
+                organization,
+                tags,
+                attachments,
+                json,
+            )
+            .await
+        }
         TicketCmd::Update {
             id,
             state,
             priority,
             owner,
             title,
-        } => update(client, &id, state, priority, owner, title, json).await,
+            customer,
+            organization,
+            tags_add,
+            tags_remove,
+        } => {
+            update(
+                client,
+                &id,
+                state,
+                priority,
+                owner,
+                title,
+                customer,
+                organization,
+                tags_add,
+                tags_remove,
+                json,
+            )
+            .await
+        }
         TicketCmd::Article { cmd } => match cmd {
             ArticleCmd::Add {
                 id,
                 body,
                 subject,
                 public,
-            } => article_add(client, &id, body, subject, !public, json).await,
+                attachments,
+            } => article_add(client, &id, body, subject, !public, attachments, json).await,
         },
         TicketCmd::Overview => overview(client, json).await,
     }
@@ -243,27 +309,48 @@ async fn create(
     customer: Option<String>,
     priority: String,
     state: String,
+    owner: Option<String>,
+    organization: Option<String>,
+    tags: Option<String>,
+    attachments: Option<String>,
     json: bool,
 ) -> Result<()> {
+    let attachment_objs = build_attachments_opt(attachments.as_deref()).await?;
+
+    let mut article = serde_json::json!({
+        "subject": title,
+        "body": body_text,
+        "type": "note",
+        "internal": false,
+    });
+    if !attachment_objs.is_empty() {
+        article["attachments"] = Value::Array(attachment_objs);
+    }
+
     let mut payload: Map<String, Value> = Map::new();
     payload.insert("title".into(), Value::String(title.clone()));
     payload.insert("group".into(), Value::String(group));
-    payload.insert("priority".into(), serde_json::json!({ "name": priority }));
-    payload.insert("state".into(), serde_json::json!({ "name": state }));
-    payload.insert(
-        "article".into(),
-        serde_json::json!({
-            "subject": title,
-            "body": body_text,
-            "type": "note",
-            "internal": false,
-        }),
-    );
+    // Plain name string. Wrapping in `{"name": ...}` triggers Zammad
+    // ActiveSupport::HashWithIndifferentAccess cast error on POST.
+    payload.insert("priority".into(), Value::String(priority));
+    payload.insert("state".into(), Value::String(state));
+    payload.insert("article".into(), article);
     insert_opt_str(&mut payload, "customer", customer);
+    insert_opt_str(&mut payload, "owner", owner);
+    insert_opt_str(&mut payload, "organization", organization);
 
     let value = client
         .post("/api/v1/tickets", Some(&Value::Object(payload)))
         .await?;
+
+    // Tags require a separate call per item — Zammad does not accept tags in the create payload
+    let tag_list = tags.as_deref().map(split_csv).unwrap_or_default();
+    if !tag_list.is_empty() {
+        if let Some(ticket_id) = value.get("id").and_then(|v| v.as_i64()) {
+            apply_tags(client, ticket_id, &tag_list, true).await?;
+        }
+    }
+
     if json {
         return output::emit_value(&value);
     }
@@ -272,6 +359,7 @@ async fn create(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn update(
     client: &ZammadClient,
     id_str: &str,
@@ -279,6 +367,10 @@ async fn update(
     priority: Option<String>,
     owner: Option<String>,
     title: Option<String>,
+    customer: Option<String>,
+    organization: Option<String>,
+    tags_add: Option<String>,
+    tags_remove: Option<String>,
     json: bool,
 ) -> Result<()> {
     let mut body: Map<String, Value> = Map::new();
@@ -286,22 +378,63 @@ async fn update(
     insert_opt_str(&mut body, "priority", priority);
     insert_opt_str(&mut body, "owner", owner);
     insert_opt_str(&mut body, "title", title);
-    if body.is_empty() {
+    insert_opt_str(&mut body, "customer", customer);
+    insert_opt_str(&mut body, "organization", organization);
+
+    let add_list = tags_add.as_deref().map(split_csv).unwrap_or_default();
+    let remove_list = tags_remove.as_deref().map(split_csv).unwrap_or_default();
+
+    if body.is_empty() && add_list.is_empty() && remove_list.is_empty() {
         anyhow::bail!("No fields provided to update");
     }
 
     let resolved = resolve_ticket_id(client, id_str).await?;
-    let value = client
-        .put(
-            &format!("/api/v1/tickets/{resolved}"),
-            Some(&Value::Object(body)),
-        )
-        .await?;
+
+    let value = if body.is_empty() {
+        // No PUT payload — just fetch current state for output after tag changes
+        client
+            .get(
+                &format!("/api/v1/tickets/{resolved}"),
+                Some(&[("expand", "true")]),
+            )
+            .await?
+    } else {
+        client
+            .put(
+                &format!("/api/v1/tickets/{resolved}"),
+                Some(&Value::Object(body)),
+            )
+            .await?
+    };
+
+    if !add_list.is_empty() {
+        apply_tags(client, resolved, &add_list, true).await?;
+    }
+    if !remove_list.is_empty() {
+        apply_tags(client, resolved, &remove_list, false).await?;
+    }
+
     if json {
         return output::emit_value(&value);
     }
     let ticket: Ticket = serde_json::from_value(value)?;
     output::print_ticket_detail(&ticket);
+    Ok(())
+}
+
+/// Apply tag add/remove for a ticket. Zammad takes one item per request,
+/// so calls are fired concurrently to amortize latency.
+async fn apply_tags(
+    client: &ZammadClient,
+    ticket_id: i64,
+    tags: &[String],
+    add: bool,
+) -> Result<()> {
+    let op = if add { "add" } else { "remove" };
+    let futs = tags
+        .iter()
+        .map(|t| tag_op(client, op, TICKET_OBJECT, ticket_id, t));
+    try_join_all(futs).await?;
     Ok(())
 }
 
@@ -311,15 +444,21 @@ async fn article_add(
     body_text: String,
     subject: Option<String>,
     internal: bool,
+    attachments: Option<String>,
     json: bool,
 ) -> Result<()> {
     let resolved = resolve_ticket_id(client, id_str).await?;
+    let attachment_objs = build_attachments_opt(attachments.as_deref()).await?;
+
     let mut body: Map<String, Value> = Map::new();
     body.insert("ticket_id".into(), Value::Number(resolved.into()));
     body.insert("body".into(), Value::String(body_text));
     body.insert("type".into(), Value::String("note".into()));
     body.insert("internal".into(), Value::Bool(internal));
     insert_opt_str(&mut body, "subject", subject);
+    if !attachment_objs.is_empty() {
+        body.insert("attachments".into(), Value::Array(attachment_objs));
+    }
 
     let value = client
         .post("/api/v1/ticket_articles", Some(&Value::Object(body)))
@@ -334,31 +473,55 @@ async fn article_add(
 }
 
 async fn overview(client: &ZammadClient, json: bool) -> Result<()> {
+    const PAGE_CAP: usize = 100;
     let states = ["new", "open", "pending reminder", "pending close", "closed"];
 
     let futs = states.iter().map(|s| async move {
         let params = vec![
             ("query", format!("state.name:{s}")),
-            ("per_page", "100".to_string()),
+            ("per_page", PAGE_CAP.to_string()),
         ];
         let value = client.get("/api/v1/tickets/search", Some(&params)).await?;
         let count = value.as_array().map(|a| a.len()).unwrap_or(0);
         Ok::<_, anyhow::Error>((s.to_string(), count))
     });
     let summary = try_join_all(futs).await?;
+    let capped: Vec<&str> = summary
+        .iter()
+        .filter(|(_, n)| *n >= PAGE_CAP)
+        .map(|(s, _)| s.as_str())
+        .collect();
 
     if json {
-        let map: Map<String, Value> = summary
+        let mut map: Map<String, Value> = summary
             .iter()
             .map(|(s, n)| (s.clone(), Value::Number((*n as i64).into())))
             .collect();
+        if !capped.is_empty() {
+            map.insert(
+                "_warning".into(),
+                Value::String(format!(
+                    "states at per_page cap ({PAGE_CAP}) — true count may be higher: {}",
+                    capped.join(", ")
+                )),
+            );
+        }
         return output::emit_value(&Value::Object(map));
     }
 
     use colored::Colorize;
     println!("{}", "Ticket Overview".bold().underline());
     for (s, n) in &summary {
-        println!("  {:<20} {}", s, n.to_string().bold());
+        let suffix = if *n >= PAGE_CAP { "+" } else { "" };
+        println!("  {:<20} {}{}", s, n.to_string().bold(), suffix.yellow());
+    }
+    if !capped.is_empty() {
+        eprintln!(
+            "{} states hit per_page cap ({}): {} — counts may undercount",
+            "warning:".yellow().bold(),
+            PAGE_CAP,
+            capped.join(", ")
+        );
     }
     Ok(())
 }

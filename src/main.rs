@@ -8,7 +8,7 @@ mod output;
 mod types;
 mod util;
 
-use commands::{org, system, ticket, user};
+use commands::{org, system, tags, ticket, user};
 
 #[derive(Parser)]
 #[command(name = "zammad-cli")]
@@ -45,6 +45,11 @@ enum Commands {
         #[command(subcommand)]
         cmd: system::SystemCmd,
     },
+    /// Tag operations (list/add/remove on any object)
+    Tags {
+        #[command(subcommand)]
+        cmd: tags::TagsCmd,
+    },
 }
 
 #[tokio::main]
@@ -58,5 +63,6 @@ async fn main() -> Result<()> {
         Commands::Org { cmd } => org::run(cmd, &client, cli.json).await,
         Commands::User { cmd } => user::run(cmd, &client, cli.json).await,
         Commands::System { cmd } => system::run(cmd, &client, cli.json).await,
+        Commands::Tags { cmd } => tags::run(cmd, &client, cli.json).await,
     }
 }
