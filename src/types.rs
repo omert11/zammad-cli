@@ -42,6 +42,20 @@ pub struct Article {
     pub body: String,
     #[serde(default)]
     pub internal: bool,
+    #[serde(default)]
+    pub attachments: Vec<ArticleAttachment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArticleAttachment {
+    #[serde(default)]
+    pub id: Option<i64>,
+    #[serde(default)]
+    pub filename: String,
+    #[serde(default)]
+    pub size: Option<String>,
+    #[serde(default, rename = "preferences")]
+    pub preferences: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
