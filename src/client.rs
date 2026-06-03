@@ -74,6 +74,33 @@ impl ZammadClient {
         self.request::<(), B>(Method::DELETE, path, None, body)
             .await
     }
+
+    /// GET a raw binary body (e.g. attachment download). Returns the bytes
+    /// plus the response `Content-Type` when present.
+    pub async fn get_bytes(&self, path: &str) -> Result<(Vec<u8>, Option<String>)> {
+        let url = format!("{}{}", self.base_url, path);
+        let resp = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .context("Zammad request failed")?;
+        let status = resp.status();
+        if !status.is_success() {
+            // Reuse the JSON error formatter for a consistent message
+            return handle_response(resp).await.map(|_| (Vec::new(), None));
+        }
+        let content_type = resp
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let bytes = resp
+            .bytes()
+            .await
+            .context("Failed to read attachment body")?;
+        Ok((bytes.to_vec(), content_type))
+    }
 }
 
 async fn handle_response(resp: Response) -> Result<Value> {

@@ -119,8 +119,9 @@ pub fn print_articles(articles: &[Article]) {
     }
     for a in articles {
         let header = format!(
-            "[{}] {} - {}",
+            "[{}] (article {}) {} - {}",
             a.created_at.as_deref().unwrap_or("?"),
+            a.id,
             a.sender.as_deref().unwrap_or("?"),
             a.from_addr.as_deref().unwrap_or("?")
         );
@@ -140,7 +141,8 @@ pub fn print_articles(articles: &[Article]) {
             println!("  {}", "Attachments:".bold());
             for att in &a.attachments {
                 let size = att.size.as_deref().unwrap_or("?");
-                println!("    - {} ({} bytes)", att.filename, size);
+                let id = att.id.map(|i| i.to_string()).unwrap_or_else(|| "?".into());
+                println!("    - [{id}] {} ({size} bytes)", att.filename);
             }
         }
         println!("{}", "---".dimmed());

@@ -56,7 +56,7 @@ src/
 ├── output.rs               render() dispatch + table/detail printers
 ├── util.rs                 truncate, build_search_query (auto-quote), insert_opt_str
 └── commands/
-    ├── ticket.rs           search/list/get/articles/create/update/article add/overview
+    ├── ticket.rs           search/list/get/articles/create/update/article add/attachment list/attachment download/overview
     ├── org.rs              list/search
     ├── user.rs             search
     └── system.rs           groups/states/priorities

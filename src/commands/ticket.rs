@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::Subcommand;
 use futures::future::try_join_all;
 use serde_json::{Map, Value};
@@ -94,6 +94,11 @@ pub enum TicketCmd {
         #[command(subcommand)]
         cmd: ArticleCmd,
     },
+    /// Attachment subcommands (list/download)
+    Attachment {
+        #[command(subcommand)]
+        cmd: AttachmentCmd,
+    },
     /// Get summary of ticket counts by state
     Overview,
 }
@@ -113,6 +118,28 @@ pub enum ArticleCmd {
         /// Comma-separated file paths to attach
         #[arg(long)]
         attachments: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AttachmentCmd {
+    /// List all attachments of a ticket (`#NUMBER` or internal ID) with their IDs
+    List { id: String },
+    /// Download attachment(s) from a ticket (`#NUMBER` or internal ID)
+    Download {
+        id: String,
+        /// Article ID owning the attachment (see `attachment list` or `articles`)
+        #[arg(long, requires = "attachment")]
+        article: Option<i64>,
+        /// Attachment ID to download (requires --article)
+        #[arg(long)]
+        attachment: Option<i64>,
+        /// Download every attachment on the ticket
+        #[arg(long, conflicts_with_all = ["article", "attachment"])]
+        all: bool,
+        /// Output directory (created if missing; defaults to current dir)
+        #[arg(long, short, default_value = ".")]
+        out: String,
     },
 }
 
@@ -208,6 +235,16 @@ pub async fn run(cmd: TicketCmd, client: &ZammadClient, json: bool) -> Result<()
                 attachments,
             } => article_add(client, &id, body, subject, !public, attachments, json).await,
         },
+        TicketCmd::Attachment { cmd } => match cmd {
+            AttachmentCmd::List { id } => attachment_list(client, &id, json).await,
+            AttachmentCmd::Download {
+                id,
+                article,
+                attachment,
+                all,
+                out,
+            } => attachment_download(client, &id, article, attachment, all, &out, json).await,
+        },
         TicketCmd::Overview => overview(client, json).await,
     }
 }
@@ -288,16 +325,164 @@ async fn get(client: &ZammadClient, id_str: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-async fn articles(client: &ZammadClient, id_str: &str, json: bool) -> Result<()> {
-    let resolved = resolve_ticket_id(client, id_str).await?;
+async fn fetch_articles(client: &ZammadClient, ticket_id: i64) -> Result<Vec<Article>> {
     let value = client
         .get::<()>(
-            &format!("/api/v1/ticket_articles/by_ticket/{resolved}"),
+            &format!("/api/v1/ticket_articles/by_ticket/{ticket_id}"),
             None,
         )
         .await?;
-    let articles: Vec<Article> = serde_json::from_value(value).unwrap_or_default();
+    Ok(serde_json::from_value(value).unwrap_or_default())
+}
+
+async fn articles(client: &ZammadClient, id_str: &str, json: bool) -> Result<()> {
+    let resolved = resolve_ticket_id(client, id_str).await?;
+    let articles = fetch_articles(client, resolved).await?;
     output::render(&articles, json, |a| output::print_articles(a))
+}
+
+/// List every attachment across a ticket's articles, with article + attachment IDs.
+async fn attachment_list(client: &ZammadClient, id_str: &str, json: bool) -> Result<()> {
+    let resolved = resolve_ticket_id(client, id_str).await?;
+    let articles = fetch_articles(client, resolved).await?;
+
+    let mut rows: Vec<Value> = Vec::new();
+    for a in &articles {
+        for att in &a.attachments {
+            let Some(att_id) = att.id else { continue };
+            rows.push(serde_json::json!({
+                "ticket_id": resolved,
+                "article_id": a.id,
+                "attachment_id": att_id,
+                "filename": att.filename,
+                "size": att.size,
+            }));
+        }
+    }
+
+    if json {
+        return output::emit_value(&Value::Array(rows));
+    }
+
+    if rows.is_empty() {
+        println!("No attachments on ticket {resolved}");
+        return Ok(());
+    }
+    println!("Attachments on ticket {resolved}:");
+    for r in &rows {
+        let article_id = r["article_id"].as_i64().unwrap_or_default();
+        let att_id = r["attachment_id"].as_i64().unwrap_or_default();
+        let filename = r["filename"].as_str().unwrap_or("attachment");
+        let size = r["size"].as_str().unwrap_or("?");
+        println!("  article {article_id} / attachment {att_id}  {filename} ({size} bytes)");
+    }
+    println!(
+        "\nDownload: zammad-cli ticket attachment download {resolved} \
+         --article <ARTICLE_ID> --attachment <ATTACHMENT_ID>"
+    );
+    Ok(())
+}
+
+/// Download one attachment (article+attachment IDs) or all of a ticket's attachments.
+async fn attachment_download(
+    client: &ZammadClient,
+    id_str: &str,
+    article: Option<i64>,
+    attachment: Option<i64>,
+    all: bool,
+    out_dir: &str,
+    json: bool,
+) -> Result<()> {
+    let resolved = resolve_ticket_id(client, id_str).await?;
+    tokio::fs::create_dir_all(out_dir)
+        .await
+        .with_context(|| format!("Failed to create output directory: {out_dir}"))?;
+
+    // Collect (article_id, attachment_id, filename) targets.
+    let mut targets: Vec<(i64, i64, String)> = Vec::new();
+    if all {
+        let articles = fetch_articles(client, resolved).await?;
+        for a in &articles {
+            for att in &a.attachments {
+                if let Some(att_id) = att.id {
+                    targets.push((a.id, att_id, att.filename.clone()));
+                }
+            }
+        }
+        if targets.is_empty() {
+            return Err(anyhow!("Ticket {resolved} has no attachments"));
+        }
+    } else {
+        let article_id = article
+            .ok_or_else(|| anyhow!("Provide --article and --attachment, or --all"))?;
+        let att_id = attachment
+            .ok_or_else(|| anyhow!("Provide --article and --attachment, or --all"))?;
+        // Resolve the filename from the article metadata when available.
+        let filename = fetch_articles(client, resolved)
+            .await
+            .ok()
+            .and_then(|articles| {
+                articles
+                    .iter()
+                    .find(|a| a.id == article_id)
+                    .and_then(|a| a.attachments.iter().find(|att| att.id == Some(att_id)))
+                    .map(|att| att.filename.clone())
+            })
+            .unwrap_or_else(|| format!("attachment-{att_id}"));
+        targets.push((article_id, att_id, filename));
+    }
+
+    let mut saved: Vec<Value> = Vec::new();
+    for (article_id, att_id, filename) in targets {
+        let path = format!(
+            "/api/v1/ticket_attachment/{resolved}/{article_id}/{att_id}"
+        );
+        let (bytes, _ct) = client.get_bytes(&path).await?;
+        let dest = dedupe_path(out_dir, &filename);
+        tokio::fs::write(&dest, &bytes)
+            .await
+            .with_context(|| format!("Failed to write {dest}"))?;
+        if !json {
+            println!("Saved {} ({} bytes)", dest, bytes.len());
+        }
+        saved.push(serde_json::json!({
+            "article_id": article_id,
+            "attachment_id": att_id,
+            "path": dest,
+            "bytes": bytes.len(),
+        }));
+    }
+
+    if json {
+        return output::emit_value(&Value::Array(saved));
+    }
+    Ok(())
+}
+
+/// Join `dir`/`filename`, appending a counter (`name (1).ext`) when the path exists,
+/// so downloading multiple same-named attachments does not overwrite.
+fn dedupe_path(dir: &str, filename: &str) -> String {
+    let base = std::path::Path::new(dir).join(filename);
+    if !base.exists() {
+        return base.to_string_lossy().into_owned();
+    }
+    let path = std::path::Path::new(filename);
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("attachment");
+    let ext = path.extension().and_then(|s| s.to_str());
+    for n in 1..10_000 {
+        let candidate = match ext {
+            Some(e) => format!("{stem} ({n}).{e}"),
+            None => format!("{stem} ({n})"),
+        };
+        let p = std::path::Path::new(dir).join(&candidate);
+        if !p.exists() {
+            return p.to_string_lossy().into_owned();
+        }
+    }
+    base.to_string_lossy().into_owned()
 }
 
 #[allow(clippy::too_many_arguments)]
