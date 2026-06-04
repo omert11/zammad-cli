@@ -31,6 +31,17 @@ cargo fmt --all                            # format
 cargo test                                 # test
 ```
 
+**Kurulum (ZORUNLU adım)**: `zammad-cli` skill'i ve tüm shell oturumları PATH'teki
+`~/.local/bin/zammad-cli`'ı çağırır — repo'daki `target/release/zammad-cli`'ı DEĞİL.
+Kod değişip release derlendikten sonra kurulu binary mutlaka güncellenmeli, yoksa
+CLI/skill eski binary'yi kullanır ve yeni komutu `unrecognized subcommand` diye reddeder:
+
+```bash
+cargo build --release
+cp target/release/zammad-cli ~/.local/bin/zammad-cli   # ZORUNLU — atlanırsa yeni komutlar görünmez
+which zammad-cli                                       # → ~/.local/bin/zammad-cli (doğrula)
+```
+
 Binary kullanımı:
 
 ```bash
