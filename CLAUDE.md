@@ -95,6 +95,7 @@ skills/zammad-cli/SKILL.md  Claude Code skill (workflow wrapper)
   - `priority.name:"3 high"`
   - `owner.email:agent@example.com`
 - Ticket states: `new`, `open`, `closed`, `pending reminder`, `pending close`
+  - `pending close` / `pending reminder` Zammad'da `pending_time` (ISO 8601) zorunlu kılar → `ticket update --pending-time <ISO8601>`. CLI eksikse erken hata verir (HTTP'ye gitmeden).
 - Ticket priorities: `1 low`, `2 normal`, `3 high`
 - Article `internal: true` (default) = dahili not, `false` = halka açık yanıt
 - `ticket overview` 5 state için paralel `try_join_all` ile fetch yapar (per_page=100, .len() ile sayar — büyük instance'larda undercount riski var)

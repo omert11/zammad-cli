@@ -7,7 +7,9 @@ use crate::client::ZammadClient;
 use crate::commands::tags::{tag_op, TICKET_OBJECT};
 use crate::output;
 use crate::types::{Article, Ticket};
-use crate::util::{build_attachments_opt, build_search_query, insert_opt_str, split_csv};
+use crate::util::{
+    build_attachments_opt, build_search_query, insert_opt_str, is_iso8601_datetime, split_csv,
+};
 
 #[derive(Subcommand)]
 pub enum TicketCmd {
@@ -72,6 +74,10 @@ pub enum TicketCmd {
         id: String,
         #[arg(long)]
         state: Option<String>,
+        /// ISO 8601 timestamp for pending states (e.g. 2026-06-18T17:00:00Z).
+        /// Required when --state is "pending close" or "pending reminder".
+        #[arg(long = "pending-time")]
+        pending_time: Option<String>,
         #[arg(long)]
         priority: Option<String>,
         #[arg(long)]
@@ -203,6 +209,7 @@ pub async fn run(cmd: TicketCmd, client: &ZammadClient, json: bool) -> Result<()
         TicketCmd::Update {
             id,
             state,
+            pending_time,
             priority,
             owner,
             title,
@@ -215,6 +222,7 @@ pub async fn run(cmd: TicketCmd, client: &ZammadClient, json: bool) -> Result<()
                 client,
                 &id,
                 state,
+                pending_time,
                 priority,
                 owner,
                 title,
@@ -413,10 +421,10 @@ async fn attachment_download(
             return Err(anyhow!("Ticket {resolved} has no attachments"));
         }
     } else {
-        let article_id = article
-            .ok_or_else(|| anyhow!("Provide --article and --attachment, or --all"))?;
-        let att_id = attachment
-            .ok_or_else(|| anyhow!("Provide --article and --attachment, or --all"))?;
+        let article_id =
+            article.ok_or_else(|| anyhow!("Provide --article and --attachment, or --all"))?;
+        let att_id =
+            attachment.ok_or_else(|| anyhow!("Provide --article and --attachment, or --all"))?;
         // Resolve the filename from the article metadata when available.
         let filename = fetch_articles(client, resolved)
             .await
@@ -434,9 +442,7 @@ async fn attachment_download(
 
     let mut saved: Vec<Value> = Vec::new();
     for (article_id, att_id, filename) in targets {
-        let path = format!(
-            "/api/v1/ticket_attachment/{resolved}/{article_id}/{att_id}"
-        );
+        let path = format!("/api/v1/ticket_attachment/{resolved}/{article_id}/{att_id}");
         let (bytes, _ct) = client.get_bytes(&path).await?;
         let dest = dedupe_path(out_dir, &filename);
         tokio::fs::write(&dest, &bytes)
@@ -549,6 +555,7 @@ async fn update(
     client: &ZammadClient,
     id_str: &str,
     state: Option<String>,
+    pending_time: Option<String>,
     priority: Option<String>,
     owner: Option<String>,
     title: Option<String>,
@@ -558,8 +565,46 @@ async fn update(
     tags_remove: Option<String>,
     json: bool,
 ) -> Result<()> {
+    // Pending states require a `pending_time`; fail early with a clear message
+    // instead of surfacing Zammad's opaque 422 "Missing required value" error.
+    // Comparison is case-insensitive so "Pending Close" is treated the same as
+    // the canonical "pending close" and does not slip past validation.
+    if let Some(s) = state.as_deref() {
+        let is_pending = matches!(
+            s.to_lowercase().as_str(),
+            "pending close" | "pending reminder"
+        );
+        if is_pending && pending_time.is_none() {
+            anyhow::bail!(
+                "state \"{s}\" requires --pending-time <ISO8601> (e.g. 2026-06-18T17:00:00Z)"
+            );
+        }
+        if !is_pending && pending_time.is_some() {
+            anyhow::bail!(
+                "--pending-time only applies to \"pending close\" or \"pending reminder\" states"
+            );
+        }
+    }
+    // When --state is omitted, --pending-time is still allowed: it reschedules a
+    // ticket already in a pending state on the server (Zammad accepts a lone
+    // `pending_time` PUT). We cannot know the server-side state here, so let
+    // Zammad reject it if the ticket is not pending.
+
+    // Validate the timestamp shape before sending, so an obvious typo surfaces a
+    // clear error instead of Zammad's opaque 422. Kept minimal (no chrono dep):
+    // require an ISO 8601 date+time prefix `YYYY-MM-DDTHH:MM`.
+    if let Some(pt) = pending_time.as_deref() {
+        if !is_iso8601_datetime(pt) {
+            anyhow::bail!(
+                "--pending-time \"{pt}\" is not a valid ISO 8601 timestamp \
+                 (e.g. 2026-06-18T17:00:00Z)"
+            );
+        }
+    }
+
     let mut body: Map<String, Value> = Map::new();
     insert_opt_str(&mut body, "state", state);
+    insert_opt_str(&mut body, "pending_time", pending_time);
     insert_opt_str(&mut body, "priority", priority);
     insert_opt_str(&mut body, "owner", owner);
     insert_opt_str(&mut body, "title", title);

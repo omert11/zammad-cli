@@ -57,6 +57,8 @@ zammad-cli --json ticket create \
 # Update (DESTRUCTIVE — onay al)
 zammad-cli --json ticket update #61234 --state closed
 zammad-cli --json ticket update #61234 --priority "3 high" --owner agent@example.com
+# Pending state → --pending-time (ISO 8601) ZORUNLU
+zammad-cli --json ticket update #61234 --state "pending close" --pending-time 2026-06-18T17:00:00Z
 
 # Article add (DESTRUCTIVE — onay al, public yorum müşteriye gider)
 zammad-cli --json ticket article add #61234 --body "..."           # internal default
