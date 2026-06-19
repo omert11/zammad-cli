@@ -107,6 +107,18 @@ pub enum TicketCmd {
     },
     /// Get summary of ticket counts by state
     Overview,
+    /// Create or update a shared draft (internal ID — see `ticket get` for the numeric ID)
+    SharedDraft {
+        id: String,
+        #[arg(long)]
+        body: String,
+        /// Article type (email or note; default: email)
+        #[arg(long, default_value = "email")]
+        r#type: String,
+        /// Mark as internal note (default: public reply)
+        #[arg(long)]
+        internal: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -254,6 +266,12 @@ pub async fn run(cmd: TicketCmd, client: &ZammadClient, json: bool) -> Result<()
             } => attachment_download(client, &id, article, attachment, all, &out, json).await,
         },
         TicketCmd::Overview => overview(client, json).await,
+        TicketCmd::SharedDraft {
+            id,
+            body,
+            r#type,
+            internal,
+        } => shared_draft(client, &id, body, r#type, internal, json).await,
     }
 }
 
@@ -753,6 +771,53 @@ async fn overview(client: &ZammadClient, json: bool) -> Result<()> {
             capped.join(", ")
         );
     }
+    Ok(())
+}
+
+/// Create or update a shared draft for a ticket.
+///
+/// PUT /api/v1/tickets/{ticket_id}/shared_draft
+async fn shared_draft(
+    client: &ZammadClient,
+    id_str: &str,
+    body_text: String,
+    article_type: String,
+    internal: bool,
+    json: bool,
+) -> Result<()> {
+    let resolved = resolve_ticket_id(client, id_str).await?;
+    let form_id = uuid::Uuid::new_v4().to_string();
+
+    let payload = serde_json::json!({
+        "form_id": form_id,
+        "new_article": {
+            "body": body_text,
+            "content_type": "text/html",
+            "type": article_type,
+            "internal": internal,
+        },
+        "ticket_attributes": {},
+    });
+
+    let value = client
+        .put(
+            &format!("/api/v1/tickets/{resolved}/shared_draft"),
+            Some(&payload),
+        )
+        .await?;
+
+    if json {
+        return output::emit_value(&value);
+    }
+
+    let draft_id = value
+        .get("shared_draft_id")
+        .and_then(|v| v.as_i64())
+        .unwrap_or_default();
+    let kind = if internal { "internal" } else { "public" };
+    output::print_message(&format!(
+        "Shared draft #{draft_id} saved on ticket {resolved} ({kind})"
+    ));
     Ok(())
 }
 
