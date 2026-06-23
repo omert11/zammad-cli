@@ -94,6 +94,9 @@ pub enum TicketCmd {
         /// Comma-separated tags to remove
         #[arg(long = "tags-remove")]
         tags_remove: Option<String>,
+        /// Comma-separated Jira ticket keys (e.g. "TIO-817, TIO-818")
+        #[arg(long = "jira-tickets")]
+        jira_tickets: Option<String>,
     },
     /// Article subcommands
     Article {
@@ -229,6 +232,7 @@ pub async fn run(cmd: TicketCmd, client: &ZammadClient, json: bool) -> Result<()
             organization,
             tags_add,
             tags_remove,
+            jira_tickets,
         } => {
             update(
                 client,
@@ -242,9 +246,10 @@ pub async fn run(cmd: TicketCmd, client: &ZammadClient, json: bool) -> Result<()
                 organization,
                 tags_add,
                 tags_remove,
+                jira_tickets,
                 json,
             )
-            .await
+                .await
         }
         TicketCmd::Article { cmd } => match cmd {
             ArticleCmd::Add {
@@ -581,6 +586,7 @@ async fn update(
     organization: Option<String>,
     tags_add: Option<String>,
     tags_remove: Option<String>,
+    jira_tickets: Option<String>,
     json: bool,
 ) -> Result<()> {
     // Pending states require a `pending_time`; fail early with a clear message
@@ -628,6 +634,7 @@ async fn update(
     insert_opt_str(&mut body, "title", title);
     insert_opt_str(&mut body, "customer", customer);
     insert_opt_str(&mut body, "organization", organization);
+    insert_opt_str(&mut body, "jira_tickets", jira_tickets);
 
     let add_list = tags_add.as_deref().map(split_csv).unwrap_or_default();
     let remove_list = tags_remove.as_deref().map(split_csv).unwrap_or_default();

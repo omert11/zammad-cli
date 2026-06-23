@@ -25,6 +25,8 @@ pub struct Ticket {
     pub updated_at: Option<String>,
     #[serde(default)]
     pub article_count: Option<i64>,
+    #[serde(default)]
+    pub jira_tickets: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
