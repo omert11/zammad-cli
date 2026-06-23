@@ -101,6 +101,11 @@ pub fn print_ticket_detail(t: &Ticket) {
         "Organization:".bold(),
         t.organization.as_deref().unwrap_or("-")
     );
+    if let Some(jt) = &t.jira_tickets {
+        if !jt.is_empty() {
+            println!("  {} {}", "Jira Tickets:".bold(), jt.yellow());
+        }
+    }
     if let Some(c) = &t.created_at {
         println!("  {} {}", "Created:".bold(), c);
     }
